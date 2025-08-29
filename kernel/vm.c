@@ -379,8 +379,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  memmove(dst, (void *)srcva, len);
-  return 0;
+  return copyin_new(dst, srcva, len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -390,11 +389,7 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  // Check for overflow.
-  if(srcva >= PLIC)
-    return -1;
-  strncpy(dst, (char *)srcva, max);
-  return strlen(dst);
+  return copyinstr_new(dst, srcva, max);
 }
 
 // Forward declaration for the recursive helper function.

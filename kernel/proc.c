@@ -263,24 +263,35 @@ userinit(void)
 int
 growproc(int n)
 {
-  uint oldsz, newsz; // Use uint for consistency with the report
-  struct proc *p = myproc();
+ uint newsz;
+ struct proc *p = myproc();
+ uint oldsz = p->sz;
 
-  oldsz = p->sz;
-  if(n > 0){
-    if(oldsz + n >= PLIC) // Check against PLIC
-      return -1;
-    if((newsz = uvmalloc(p->pagetable, oldsz, oldsz + n)) == 0) {
-      return -1;
-    }
-  } else if (n < 0) {
-    newsz = uvmdealloc(p->pagetable, oldsz, oldsz + n);
-  } else { // Handle n==0 case
-    return 0; 
-  }
+ if(n > 0){
+ if(oldsz + n >= PLIC)
+ return -1;
+ if((newsz = uvmalloc(p->pagetable , oldsz , oldsz + n)) == 0)
+ return -1;
+ if(uvmcopy_to_kpgtbl(p->kernel_pagetable , p->pagetable , oldsz ,
+newsz) < 0) {
+ uvmdealloc(p->pagetable , newsz , oldsz);
+ return -1;
+ }
+ p->sz = newsz;
+ } else if(n < 0){
+ uint target_sz = oldsz + n;
+ uint unmap_start = PGROUNDUP(target_sz);
+ uint unmap_end = PGROUNDUP(oldsz);
 
-  p->sz = newsz;
-  return 0;
+ if(unmap_start < unmap_end){
+ uint bytes_to_unmap = unmap_end - unmap_start;
+ uvmunmap(p->kernel_pagetable , unmap_start , bytes_to_unmap /
+PGSIZE , 0);
+ }
+ newsz = uvmdealloc(p->pagetable , oldsz , target_sz);
+ p->sz = newsz;
+ }
+ return 0;
 }
 
 // Create a new process, copying the parent.
@@ -306,6 +317,7 @@ fork(void)
 
     // Sync the entire user space of the new process to its kernel page table.
   if(uvmcopy_to_kpgtbl(np->kernel_pagetable, np->pagetable, 0, p->sz) < 0){ // <<---
+    proc_freepagetable(np->pagetable , p->sz);
     freeproc(np);                                                            // <<---
     release(&np->lock);                                                      // <<---
     return -1;                                                               // <<---

@@ -1,14 +1,9 @@
-#include "param.h"
 #include "types.h"
 #include "riscv.h"
 #include "defs.h"
+#include "param.h"
 #include "spinlock.h"
 #include "proc.h"
-
-//
-// This file contains copyin_new() and copyinstr_new(), the
-// replacements for copyin and coyinstr in vm.c.
-//
 
 static struct stats {
   int ncopyin;
@@ -23,36 +18,44 @@ statscopyin(char *buf, int sz) {
   return n;
 }
 
-// Copy from user to kernel.
-// Copy len bytes to dst from virtual address srcva in a given page table.
-// Return 0 on success, -1 on error.
+// New copyin, without the pagetable argument.
 int
-copyin_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
+copyin_new(char *dst, uint64 srcva, uint64 len)
 {
   struct proc *p = myproc();
-
-  if (srcva >= p->sz || srcva+len >= p->sz || srcva+len < srcva)
+  if (srcva >= p->sz || srcva + len < srcva || srcva + len > p->sz) {
     return -1;
-  memmove((void *) dst, (void *)srcva, len);
-  stats.ncopyin++;   // XXX lock
+  }
+  memmove(dst, (void *)srcva, len);
+  stats.ncopyin++;
   return 0;
 }
 
-// Copy a null-terminated string from user to kernel.
-// Copy bytes to dst from virtual address srcva in a given page table,
-// until a '\0', or max.
-// Return 0 on success, -1 on error.
+// New copyinstr, without the pagetable argument.
 int
-copyinstr_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
+copyinstr_new(char *dst, uint64 srcva, uint64 max)
 {
   struct proc *p = myproc();
-  char *s = (char *) srcva;
-  
-  stats.ncopyinstr++;   // XXX lock
-  for(int i = 0; i < max && srcva + i < p->sz; i++){
-    dst[i] = s[i];
-    if(s[i] == '\0')
-      return 0;
+  if (srcva >= p->sz) {
+    return -1;
   }
-  return -1;
+
+  stats.ncopyinstr++;
+  int got_null = 0;
+  for(int i = 0; i < max; i++){
+    if(srcva + i >= p->sz) {
+      break;
+    }
+    dst[i] = ((char *)srcva)[i];
+    if(dst[i] == 0){
+      got_null = 1;
+      break;
+    }
+  }
+
+  if(!got_null){
+    return -1;
+  }
+  
+  return 0;
 }
