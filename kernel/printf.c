@@ -121,6 +121,7 @@ panic(char *s)
   printf("panic: ");
   printf(s);
   printf("\n");
+  backtrace();
   panicked = 1; // freeze uart output from other CPUs
   for(;;)
     ;
@@ -131,4 +132,26 @@ printfinit(void)
 {
   initlock(&pr.lock, "pr");
   pr.locking = 1;
+}
+
+// in kernel/printf.c, at the end of the file
+
+void
+backtrace(void)
+{
+  uint64 fp = r_fp(); // Get the current frame pointer
+  uint64 stack_bottom = PGROUNDDOWN(fp);
+  uint64 stack_top = stack_bottom + PGSIZE;
+
+  printf("backtrace:\n");
+
+  // Loop up the stack frames
+  while (fp >= stack_bottom && fp < stack_top) {
+    // Print the return address of the current stack frame (located at fp-8)
+    uint64 ra = *(uint64*)(fp - 8);
+    printf("%p\n", ra);
+
+    // Get the frame pointer of the previous function (located at fp-16) for the next iteration
+    fp = *(uint64*)(fp - 16);
+  }
 }

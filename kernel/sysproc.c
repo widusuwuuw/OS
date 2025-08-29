@@ -58,6 +58,8 @@ sys_sleep(void)
   int n;
   uint ticks0;
 
+  backtrace();
+
   if(argint(0, &n) < 0)
     return -1;
   acquire(&tickslock);
@@ -94,4 +96,41 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+// in kernel/sysproc.c, at the end
+uint64
+sys_sigalarm(void)
+{
+  int interval;
+  uint64 handler_addr;
+  struct proc *p = myproc();
+
+  if (argint(0, &interval) < 0 || argaddr(1, &handler_addr) < 0) {
+    return -1;
+  }
+
+  p->alarm_interval = interval;
+  p->alarm_handler = (void (*)())handler_addr;
+  p->ticks_left = interval; // Initialize the countdown
+  
+  return 0;
+}
+
+// in kernel/sysproc.c, at the end
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+
+  // Restore the trapframe from the backup.
+  *(p->trapframe) = *(p->saved_trapframe);
+
+  // Reset the alarm countdown.
+  p->ticks_left = p->alarm_interval;
+
+  // Mark the alarm as no longer active.
+  p->alarm_active = 0;
+
+  return 0;
 }

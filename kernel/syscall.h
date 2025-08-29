@@ -20,3 +20,5 @@
 #define SYS_link   19
 #define SYS_mkdir  20
 #define SYS_close  21
+#define SYS_sigalarm   24 // <<--- Add this line
+#define SYS_sigreturn  25 // <<--- Add this line

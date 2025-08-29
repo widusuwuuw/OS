@@ -76,9 +76,25 @@ usertrap(void)
   if(p->killed)
     exit(-1);
 
+
+  // --- 从这里开始是我们要添加/修改的代码 ---
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2) {
+    // Check if it's a timer interrupt, an alarm is set, the countdown is over,
+    // AND the alarm handler is not already active (to prevent re-entrancy).
+    if (p->alarm_interval > 0 && --(p->ticks_left) == 0 && p->alarm_active == 0) {
+      // Mark that the alarm handler is now active.
+      p->alarm_active = 1;
+
+      // Backup the current trapframe.
+      *(p->saved_trapframe) = *(p->trapframe);
+
+      // Set the program counter to the user-provided handler's address.
+      p->trapframe->epc = (uint64)p->alarm_handler;
+    }
     yield();
+  }
+  // --- 添加/修改结束 ---
 
   usertrapret();
 }

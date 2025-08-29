@@ -113,6 +113,20 @@ found:
     return 0;
   }
 
+  if ((p->saved_trapframe = (struct trapframe *)kalloc()) == 0) {
+  freeproc(p);
+  release(&p->lock);
+  return 0;
+}
+
+// Initialize alarm fields.
+p->alarm_interval = 0;
+p->alarm_handler = 0;
+p->ticks_left = 0;
+p->alarm_active = 0;
+
+
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -139,6 +153,13 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+
+   // --- 添加下面的代码块 (图59) ---
+  if(p->saved_trapframe)
+    kfree((void*)p->saved_trapframe);
+  p->saved_trapframe = 0;
+  // --- 添加结束 ---
+
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
