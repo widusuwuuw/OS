@@ -33,41 +33,55 @@ trapinithart(void)
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
 //
+// in kernel/trap.c
 void
 usertrap(void)
 {
   int which_dev = 0;
+  struct proc *p = myproc();
 
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
-  // send interrupts and exceptions to kerneltrap(),
-  // since we're now in the kernel.
   w_stvec((uint64)kernelvec);
 
-  struct proc *p = myproc();
-  
-  // save user program counter.
   p->trapframe->epc = r_sepc();
   
   if(r_scause() == 8){
     // system call
-
     if(p->killed)
       exit(-1);
-
-    // sepc points to the ecall instruction,
-    // but we want to return to the next instruction.
     p->trapframe->epc += 4;
-
-    // an interrupt will change sstatus &c registers,
-    // so don't enable until done with those registers.
     intr_on();
-
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  } else if ((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } 
+  // --- 从这里开始是新的页错误处理逻辑 (报告图68) ---
+  else if (r_scause() == 13 || r_scause() == 15) { // 13: Load page fault, 15: Store page fault
+    uint64 va = r_stval(); // Get the faulting virtual address
+
+    // Check if the address is a legal lazy allocation request
+    if (va >= p->sz) {
+      p->killed = 1; // Address is out of bounds, kill the process
+    } else {
+      // Allocate a physical page
+      char *mem = kalloc();
+      if (mem == 0) {
+        p->killed = 1; // Out of memory, kill the process
+      } else {
+        // Zero the page and map it.
+        memset(mem, 0, PGSIZE);
+        va = PGROUNDDOWN(va); // Align the address to a page boundary
+        if (mappages(p->pagetable, va, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U) != 0){
+          kfree(mem);
+          p->killed = 1; // Mapping failed, kill the process
+        }
+      }
+    }
+  } 
+  // --- 页错误处理逻辑结束 ---
+  else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
@@ -76,13 +90,18 @@ usertrap(void)
   if(p->killed)
     exit(-1);
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  // Handle alarm ticks
+  if(which_dev == 2) {
+    if (p->alarm_interval > 0 && --(p->ticks_left) == 0 && p->alarm_active == 0) {
+      p->alarm_active = 1;
+      *(p->saved_trapframe) = *(p->trapframe);
+      p->trapframe->epc = (uint64)p->alarm_handler;
+    }
     yield();
+  }
 
   usertrapret();
 }
-
 //
 // return to user space
 //
