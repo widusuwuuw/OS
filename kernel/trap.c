@@ -15,6 +15,7 @@ extern char trampoline[], uservec[], userret[];
 void kernelvec();
 
 extern int devintr();
+pte_t *walk(pagetable_t, uint64, int); // <<--- 添加这一行
 
 void
 trapinit(void)
@@ -33,41 +34,80 @@ trapinithart(void)
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
 //
+// in kernel/trap.c
+// in kernel/trap.c
+// in kernel/trap.c
+// in kernel/trap.c
 void
 usertrap(void)
 {
   int which_dev = 0;
+  struct proc *p = myproc();
 
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
-  // send interrupts and exceptions to kerneltrap(),
-  // since we're now in the kernel.
   w_stvec((uint64)kernelvec);
 
-  struct proc *p = myproc();
-  
-  // save user program counter.
   p->trapframe->epc = r_sepc();
   
   if(r_scause() == 8){
     // system call
-
     if(p->killed)
       exit(-1);
-
-    // sepc points to the ecall instruction,
-    // but we want to return to the next instruction.
     p->trapframe->epc += 4;
-
-    // an interrupt will change sstatus &c registers,
-    // so don't enable until done with those registers.
     intr_on();
-
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  } else if ((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } 
+  else if (r_scause() == 13 || r_scause() == 15) { // Load or Store page fault
+    uint64 va = r_stval();
+    pte_t *pte;
+
+    // COW page fault handler
+    if(va < p->sz && (pte = walk(p->pagetable, va, 0)) != 0 && (*pte & PTE_V) != 0 && (*pte & PTE_W) == 0 && (*pte & PTE_COW) != 0)
+    {
+      uint64 pa_old = PTE2PA(*pte);
+      uint flags = PTE_FLAGS(*pte);
+      char *mem;
+
+      if(get_ref(pa_old) > 1){
+        if((mem = kalloc()) == 0) {
+          p->killed = 1;
+        } else {
+          memmove(mem, (char*)pa_old, PGSIZE);
+          uvmunmap(p->pagetable, PGROUNDDOWN(va), 1, 1);
+          if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, (flags & ~PTE_COW) | PTE_W) != 0) {
+            kfree(mem);
+            p->killed = 1;
+          }
+        }
+      } else {
+        *pte = (*pte & ~PTE_COW) | PTE_W;
+      }
+    }
+    // Stack growth handler
+    else if (va >= p->sz && va < MAXVA)
+    {
+       // This is a simplified stack growth heuristic. 
+       // A page fault below the stack pointer might be a stack expansion.
+       // Let's try to allocate a new page.
+       uint64 newsz = PGROUNDUP(va);
+       if(uvmalloc(p->pagetable, newsz, newsz + PGSIZE) == 0) {
+          p->killed = 1;
+       } else {
+          p->sz = newsz + PGSIZE;
+       }
+    }
+    else 
+    {
+      // Illegal memory access
+      p->killed = 1;
+    }
+  } 
+  else 
+  {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
@@ -76,7 +116,6 @@ usertrap(void)
   if(p->killed)
     exit(-1);
 
-  // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
     yield();
 
