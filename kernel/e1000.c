@@ -95,13 +95,31 @@ e1000_init(uint32 *xregs)
 int
 e1000_transmit(struct mbuf *m)
 {
-  //
-  // Your code here.
-  //
-  // the mbuf contains an ethernet frame; program it into
-  // the TX descriptor ring so that the e1000 sends it. Stash
-  // a pointer so that it can be freed after sending.
-  //
+  acquire(&e1000_lock);
+
+  // Read the current tail pointer from the hardware register
+  uint32 idx = regs[E1000_TDT];
+
+  // Check if the transmit ring is full
+  if(!((tx_ring[idx].status) & E1000_TXD_STAT_DD)){
+    release(&e1000_lock);
+    return -1;
+  }
+
+  // Free any old mbuf that was previously at this descriptor
+  if(tx_mbufs[idx])
+    mbuffree(tx_mbufs[idx]);
+
+  // Fill in the descriptor
+  tx_mbufs[idx] = m;
+  tx_ring[idx].addr = (uint64)m->head;
+  tx_ring[idx].length = m->len;
+  tx_ring[idx].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  
+  // Update the tail pointer to notify the hardware
+  regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
+
+  release(&e1000_lock);
   
   return 0;
 }
@@ -109,21 +127,43 @@ e1000_transmit(struct mbuf *m)
 static void
 e1000_recv(void)
 {
-  //
-  // Your code here.
-  //
-  // Check for packets that have arrived from the e1000
-  // Create and deliver an mbuf for each packet (using net_rx()).
-  //
+  while(1){
+    // Calculate the next descriptor index to check
+    uint32 idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+    
+    // Check if the descriptor has new data
+    if(!((rx_ring[idx].status) & E1000_RXD_STAT_DD))
+      break; // No new packet
+
+    // Allocate a new mbuf for the received data
+    struct mbuf *m = mbufalloc(0);
+    if(!m){
+      printf("e1000_recv: mbufalloc failed\n");
+      break; // Out of memory
+    }
+
+    // Copy the data from the hardware buffer to the new mbuf
+    m->len = rx_ring[idx].length;
+    memmove(m->head, (void*)rx_ring[idx].addr, m->len);
+
+    // Pass the new mbuf to the network stack
+    net_rx(m);
+
+    // Reset the descriptor for future use
+    rx_ring[idx].status = 0;
+
+    // Update the tail pointer
+    regs[E1000_RDT] = idx;
+  }
 }
 
 void
 e1000_intr(void)
 {
-  // tell the e1000 we've seen this interrupt;
-  // without this the e1000 won't raise any
-  // further interrupts.
-  regs[E1000_ICR] = 0xffffffff;
+  // Acknowledge all interrupts by reading the ICR register
+  // (The value read is discarded)
+  regs[E1000_ICR];
 
+  // Call the recv function to process all received packets
   e1000_recv();
 }
