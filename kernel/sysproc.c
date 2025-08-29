@@ -6,6 +6,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "kernel/sysinfo.h" // <<--- 在这里或者附近添加这一行
 
 uint64
 sys_exit(void)
@@ -94,4 +95,35 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_trace(void)
+{
+  int mask;
+  if(argint(0, &mask) < 0)
+    return -1;
+  myproc()->tmask = mask;
+  return 0;
+}
+
+// At the end of kernel/sysproc.c
+uint64
+sys_sysinfo(void)
+{
+  uint64 addr; // a pointer to a struct sysinfo in user space
+  struct sysinfo info;
+
+  if (argaddr(0, &addr) < 0) {
+    return -1;
+  }
+
+  info.freemem = kfree_mem_count();
+  info.nproc = proc_count();
+
+  if (copyout(myproc()->pagetable, addr, (char *)&info, sizeof(info)) < 0) {
+    return -1;
+  }
+  
+  return 0;
 }
