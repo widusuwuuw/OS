@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -14,9 +15,9 @@ struct proc *initproc;
 
 int nextpid = 1;
 struct spinlock pid_lock;
+struct spinlock wait_lock; // <--- 添加这一行
 
 extern void forkret(void);
-static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
@@ -45,6 +46,7 @@ procinit(void)
   struct proc *p;
   
   initlock(&pid_lock, "nextpid");
+  initlock(&wait_lock, "wait_lock"); // <--- 添加这一行
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->kstack = KSTACK((int) (p - proc));
@@ -262,6 +264,10 @@ growproc(int n)
 
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
+// in kernel/proc.c
+
+// Create a new process, copying the parent.
+// Sets up child kernel stack to return as if from fork() system call.
 int
 fork(void)
 {
@@ -282,7 +288,13 @@ fork(void)
   }
   np->sz = p->sz;
 
-  np->parent = p;
+  // Copy the parent's VMA's to the child.
+  for(i = 0; i < NVMA; i++) {
+    if(p->vma[i].used) {
+      np->vma[i] = p->vma[i];
+      filedup(np->vma[i].file);
+    }
+  }
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -300,8 +312,14 @@ fork(void)
 
   pid = np->pid;
 
-  np->state = RUNNABLE;
+  release(&np->lock);
 
+  acquire(&wait_lock);
+  np->parent = p;
+  release(&wait_lock);
+
+  acquire(&np->lock);
+  np->state = RUNNABLE;
   release(&np->lock);
 
   return pid;
@@ -336,6 +354,14 @@ reparent(struct proc *p)
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
 // until its parent calls wait().
+// in kernel/proc.c
+
+// Exit the current process.  Does not return.
+// An exited process remains in the ZOMBIE state
+// until its parent calls wait().
+// Exit the current process.  Does not return.
+// An exited process remains in the ZOMBIE state
+// until its parent calls wait().
 void
 exit(int status)
 {
@@ -343,6 +369,17 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // Clean up all the VMAs of the process.
+  for (int i = 0; i < NVMA; i++) {
+    if(p->vma[i].used) {
+      if((p->vma[i].flags & MAP_SHARED) && (p->vma[i].prot & PROT_WRITE)) {
+        filewrite(p->vma[i].file, p->vma[i].addr, p->vma[i].length);
+      }
+      fileclose(p->vma[i].file);
+      p->vma[i].used = 0;
+    }
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
@@ -358,41 +395,20 @@ exit(int status)
   end_op();
   p->cwd = 0;
 
-  // we might re-parent a child to init. we can't be precise about
-  // waking up init, since we can't acquire its lock once we've
-  // acquired any other proc lock. so wake up init whether that's
-  // necessary or not. init may miss this wakeup, but that seems
-  // harmless.
-  acquire(&initproc->lock);
-  wakeup1(initproc);
-  release(&initproc->lock);
-
-  // grab a copy of p->parent, to ensure that we unlock the same
-  // parent we locked. in case our parent gives us away to init while
-  // we're waiting for the parent lock. we may then race with an
-  // exiting parent, but the result will be a harmless spurious wakeup
-  // to a dead or wrong process; proc structs are never re-allocated
-  // as anything else.
-  acquire(&p->lock);
-  struct proc *original_parent = p->parent;
-  release(&p->lock);
-  
-  // we need the parent's lock in order to wake it up from wait().
-  // the parent-then-child rule says we have to lock it first.
-  acquire(&original_parent->lock);
-
-  acquire(&p->lock);
+  acquire(&wait_lock);
 
   // Give any children to init.
   reparent(p);
 
   // Parent might be sleeping in wait().
-  wakeup1(original_parent);
+  wakeup(p->parent);
+  
+  acquire(&p->lock);
 
   p->xstate = status;
   p->state = ZOMBIE;
 
-  release(&original_parent->lock);
+  release(&wait_lock);
 
   // Jump into the scheduler, never to return.
   sched();
@@ -609,15 +625,6 @@ wakeup(void *chan)
 
 // Wake up p if it is sleeping in wait(); used by exit().
 // Caller must hold p->lock.
-static void
-wakeup1(struct proc *p)
-{
-  if(!holding(&p->lock))
-    panic("wakeup1");
-  if(p->chan == p && p->state == SLEEPING) {
-    p->state = RUNNABLE;
-  }
-}
 
 // Kill the process with the given pid.
 // The victim won't exit until it tries to return

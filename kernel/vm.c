@@ -159,6 +159,9 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 // Remove npages of mappings starting from va. va must be
 // page-aligned. The mappings must exist.
 // Optionally free the physical memory.
+// Remove npages of mappings starting from va. va must be
+// page-aligned. The mappings must exist.
+// Optionally free the physical memory.
 void
 uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 {
@@ -171,6 +174,14 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
       panic("uvmunmap: walk");
+
+    // --- START OF MMAP MODIFICATION ---
+    // If the page isn't valid (e.g., a mmap'ed page that hasn't been faulted in),
+    // there's nothing to unmap or free.
+    if((*pte & PTE_V) == 0)
+      continue;
+    // --- END OF MMAP MODIFICATION ---
+
     if((*pte & PTE_V) == 0)
       panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
@@ -294,6 +305,11 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // physical memory.
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
+// Given a parent process's page table, copy
+// its memory into a child's page table.
+// Copies up to sz bytes from old to new.
+// Returns 0 on success, -1 on failure.
+// frees any allocated pages on failure.
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
@@ -305,6 +321,14 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
+      
+    // --- START OF MMAP MODIFICATION ---
+    // If the page isn't valid (e.g., a mmap'ed page that hasn't been faulted in),
+    // we don't need to copy it. The child will fault it in on demand.
+    if((*pte & PTE_V) == 0)
+      continue;
+    // --- END OF MMAP MODIFICATION ---
+
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
@@ -320,7 +344,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   return 0;
 
  err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
+  uvmfree(new, 0);
   return -1;
 }
 

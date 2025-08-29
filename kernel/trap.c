@@ -5,6 +5,8 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -52,7 +54,6 @@ usertrap(void)
   
   if(r_scause() == 8){
     // system call
-
     if(p->killed)
       exit(-1);
 
@@ -67,6 +68,57 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 13 || r_scause() == 15) { // Page fault (load or store)
+    uint64 va = r_stval();
+    struct vma *vma = 0;
+
+    // Check if the faulting address is within a defined VMA
+    for(int i = 0; i < NVMA; i++) {
+      if(p->vma[i].used && va >= p->vma[i].addr && va < p->vma[i].addr + p->vma[i].length) {
+        vma = &p->vma[i];
+        break;
+      }
+    }
+
+    if(vma){
+      // The address is within a VMA, so this is a valid page fault.
+      // Time to do lazy allocation.
+      char *mem = kalloc();
+      if(mem == 0){
+        printf("mmap lazy allocation: out of memory\n");
+        p->killed = 1;
+      } else {
+        memset(mem, 0, PGSIZE);
+
+        // Lock the file's inode and read data into the new page
+        ilock(vma->file->ip);
+        // The offset in the file is the VMA's base offset plus the offset from the start of the VMA
+        if(readi(vma->file->ip, 0, (uint64)mem, (PGROUNDDOWN(va) - vma->addr) + vma->offset, PGSIZE) < 0){
+          iunlock(vma->file->ip);
+          kfree(mem);
+          p->killed = 1;
+        } else {
+          iunlock(vma->file->ip);
+          
+          // Determine page table permissions from VMA properties
+          int perm = PTE_U; // User-accessible
+          if(vma->prot & PROT_READ) perm |= PTE_R;
+          if(vma->prot & PROT_WRITE) perm |= PTE_W;
+          if(vma->prot & PROT_EXEC) perm |= PTE_X;
+
+          // Map the newly allocated physical page into the process's page table
+          if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, perm) != 0){
+            kfree(mem);
+            p->killed = 1;
+          }
+        }
+      }
+    } else {
+      // The address is not in any VMA. This is a true segmentation fault.
+      printf("usertrap(): segfault scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
