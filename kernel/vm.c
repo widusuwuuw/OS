@@ -379,22 +379,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
-
-  while(len > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
-
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
+  memmove(dst, (void *)srcva, len);
   return 0;
 }
 
@@ -405,38 +390,117 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  uint64 n, va0, pa0;
-  int got_null = 0;
-
-  while(got_null == 0 && max > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > max)
-      n = max;
-
-    char *p = (char *) (pa0 + (srcva - va0));
-    while(n > 0){
-      if(*p == '\0'){
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
-
-    srcva = va0 + PGSIZE;
-  }
-  if(got_null){
-    return 0;
-  } else {
+  // Check for overflow.
+  if(srcva >= PLIC)
     return -1;
+  strncpy(dst, (char *)srcva, max);
+  return strlen(dst);
+}
+
+// Forward declaration for the recursive helper function.
+void vmprint_recursive(pagetable_t, int);
+
+// Print the page table of a process.
+void
+vmprint(pagetable_t pagetable)
+{
+  // Note: %p automatically adds the "0x" prefix.
+  printf("page table %p\n", pagetable);
+  vmprint_recursive(pagetable, 1);
+}
+
+// A recursive helper function for vmprint.
+void
+vmprint_recursive(pagetable_t pagetable, int level)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if(pte & PTE_V){
+      // Print indentation for the current level.
+      for (int j = 0; j < level; j++) {
+        printf(".. "); // Use a space for clearer formatting
+      }
+      uint64 pa = PTE2PA(pte);
+      printf("%d: pte %p pa %p\n", i, pte, pa);
+
+      // A PTE is a pointer to a page table if its R, W, and X bits are all zero.
+      if((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+        vmprint_recursive((pagetable_t)pa, level + 1);
+      }
+    }
   }
+}
+
+// Create a new kernel page table.
+// based on kvminit().
+pagetable_t
+kvmcreate()
+{
+  pagetable_t kpgtbl = uvmcreate();
+  if(kpgtbl == 0)
+    return 0;
+
+  // uart registers
+  mappages(kpgtbl, UART0, PGSIZE, UART0, PTE_R | PTE_W);
+  // virtio mmio disk interface
+  mappages(kpgtbl, VIRTIO0, PGSIZE, VIRTIO0, PTE_R | PTE_W);
+  // PLIC
+  mappages(kpgtbl, PLIC, 0x400000, PLIC, PTE_R | PTE_W);
+  // map kernel text executable and read-only.
+  mappages(kpgtbl, KERNBASE, (uint64)etext-KERNBASE, KERNBASE, PTE_R | PTE_X);
+  // map kernel data and the physical RAM we'll make use of.
+  mappages(kpgtbl, (uint64)etext, PHYSTOP-(uint64)etext, (uint64)etext, PTE_R | PTE_W);
+  // map the trampoline for trap entry/exit.
+  mappages(kpgtbl, TRAMPOLINE, PGSIZE, (uint64)trampoline, PTE_R | PTE_X);
+
+  return kpgtbl;
+}
+
+// Recursively free page-table pages.
+// Does not free leaf pages.
+void
+kvmfreewalk(pagetable_t kpgtbl)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = kpgtbl[i];
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      kvmfreewalk((pagetable_t)child);
+      kpgtbl[i] = 0;
+    }
+  }
+  kfree((void*)kpgtbl);
+}
+
+// Copy user mappings from a user page table (upgtbl) to a kernel page
+// table (kpgtbl). Copies the address range [oldsz, newsz).
+// The key is to clear the PTE_U bit, allowing kernel access.
+// Returns 0 on success, -1 on failure.
+// in kernel/vm.c, at the end
+int
+uvmcopy_to_kpgtbl(pagetable_t kpgtbl, pagetable_t upgtbl, uint64 oldsz, uint64 newsz)
+{
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+
+  for(i = PGROUNDUP(oldsz); i < newsz; i += PGSIZE){
+    if((pte = walk(upgtbl, i, 0)) == 0)
+      panic("uvmcopy_to_kpgtbl: pte should exist");
+    if((*pte & PTE_V) == 0)
+      panic("uvmcopy_to_kpgtbl: page not present");
+    
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte);
+    flags &= ~PTE_U; // CRITICAL: Clear the PTE_U bit.
+    
+    if(mappages(kpgtbl, i, PGSIZE, pa, flags) != 0){
+      uvmunmap(kpgtbl, PGROUNDUP(oldsz), (i - PGROUNDUP(oldsz)) / PGSIZE, 0);
+      return -1;
+    }
+  }
+  return 0;
 }

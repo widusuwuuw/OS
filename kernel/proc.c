@@ -37,9 +37,7 @@ procinit(void)
       char *pa = kalloc();
       if(pa == 0)
         panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      p->kstack = (uint64)pa;
   }
   kvminithart();
 }
@@ -85,16 +83,13 @@ allocpid() {
   return pid;
 }
 
-// Look in the process table for an UNUSED proc.
-// If found, initialize state required to run in the kernel,
-// and return with p->lock held.
-// If there are no free procs, or a memory allocation fails, return 0.
 static struct proc*
 allocproc(void)
 {
   struct proc *p;
+  int i; // for KSTACK
 
-  for(p = proc; p < &proc[NPROC]; p++) {
+  for(i = 0, p = proc; p < &proc[NPROC]; i++, p++) {
     acquire(&p->lock);
     if(p->state == UNUSED) {
       goto found;
@@ -121,6 +116,21 @@ found:
     return 0;
   }
 
+  // Create a kernel page table.
+  p->kernel_pagetable = kvmcreate();
+  if(p->kernel_pagetable == 0) {
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // Map the process's kernel stack.
+  if(mappages(p->kernel_pagetable, KSTACK(i), PGSIZE, p->kstack, PTE_R | PTE_W) != 0) {
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -142,6 +152,11 @@ freeproc(struct proc *p)
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+
+  if(p->kernel_pagetable) // <<---
+    kvmfreewalk(p->kernel_pagetable); // <<--- 添加这两行
+  p->kernel_pagetable = 0;          // <<---
+
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -221,6 +236,13 @@ userinit(void)
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+
+  // Sync the first page of the init process to its kernel page table.
+  if(uvmcopy_to_kpgtbl(p->kernel_pagetable, p->pagetable, 0, PGSIZE) < 0) { // <<---
+    panic("userinit: uvmcopy_to_kpgtbl failed");                             // <<---
+  }                                                     
+
+
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -235,21 +257,29 @@ userinit(void)
 
 // Grow or shrink user memory by n bytes.
 // Return 0 on success, -1 on failure.
+// Grow or shrink user memory by n bytes.
+// Return 0 on success, -1 on failure.
+// in kernel/proc.c
 int
 growproc(int n)
 {
-  uint sz;
+  uint oldsz, newsz; // Use uint for consistency with the report
   struct proc *p = myproc();
 
-  sz = p->sz;
+  oldsz = p->sz;
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+    if(oldsz + n >= PLIC) // Check against PLIC
+      return -1;
+    if((newsz = uvmalloc(p->pagetable, oldsz, oldsz + n)) == 0) {
       return -1;
     }
-  } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+  } else if (n < 0) {
+    newsz = uvmdealloc(p->pagetable, oldsz, oldsz + n);
+  } else { // Handle n==0 case
+    return 0; 
   }
-  p->sz = sz;
+
+  p->sz = newsz;
   return 0;
 }
 
@@ -273,6 +303,14 @@ fork(void)
     release(&np->lock);
     return -1;
   }
+
+    // Sync the entire user space of the new process to its kernel page table.
+  if(uvmcopy_to_kpgtbl(np->kernel_pagetable, np->pagetable, 0, p->sz) < 0){ // <<---
+    freeproc(np);                                                            // <<---
+    release(&np->lock);                                                      // <<---
+    return -1;                                                               // <<---
+  }    
+
   np->sz = p->sz;
 
   np->parent = p;
@@ -473,8 +511,13 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
-        swtch(&c->context, &p->context);
 
+        w_satp(MAKE_SATP(p->kernel_pagetable)); // <<--- 添加此行
+        sfence_vma();    
+
+        swtch(&c->context, &p->context);
+        
+        kvminithart();  
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
