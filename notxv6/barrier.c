@@ -22,15 +22,36 @@ barrier_init(void)
   bstate.nthread = 0;
 }
 
+// in notxv6/barrier.c, replace the existing barrier() function
 static void 
 barrier()
 {
-  // YOUR CODE HERE
-  //
-  // Block until all threads have called barrier() and
-  // then increment bstate.round.
-  //
+  // The mutex protects the struct barrier's fields.
+  pthread_mutex_lock(&bstate.barrier_mutex);
+
+  // Record the current round number for this thread.
+  int my_round = bstate.round;
+
+  // Increment the count of threads that have reached the barrier.
+  bstate.nthread++;
   
+  if (bstate.nthread == nthread) {
+    // This is the last thread to arrive.
+    // Reset the counter and start the next round.
+    bstate.nthread = 0;
+    bstate.round++;
+    // Wake up all other waiting threads.
+    pthread_cond_broadcast(&bstate.barrier_cond);
+  } else {
+    // Not the last thread, so we wait.
+    // The while loop handles spurious wakeups.
+    while (my_round == bstate.round) {
+      pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
+    }
+  }
+  
+  // Release the mutex.
+  pthread_mutex_unlock(&bstate.barrier_mutex);
 }
 
 static void *
